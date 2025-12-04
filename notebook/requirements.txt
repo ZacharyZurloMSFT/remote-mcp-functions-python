@@ -1,0 +1,6 @@
+aiohttp
+azure-identity
+azure-storage-blob
+python-dotenv
+requests
+Pillow

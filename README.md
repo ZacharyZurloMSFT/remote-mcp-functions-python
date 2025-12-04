@@ -16,7 +16,9 @@ urlFragment: remote-mcp-functions-python
 
 # Getting Started with Remote MCP Servers using Azure Functions (Python)
 
-This is a quickstart template to easily build and deploy a custom remote MCP server to the cloud using Azure Functions with Python. You can clone/restore/run on your local machine with debugging, and `azd up` to have it in the cloud in a couple minutes. The MCP server is secured by design using keys and HTTPS, and allows more options for OAuth using built-in auth and/or [API Management](https://aka.ms/mcp-remote-apim-auth) as well as network isolation using VNET.
+This is a quickstart template to easily build and deploy a custom remote MCP server to the cloud using Azure Functions with Python. You can clone/restore/run on your local machine with debugging, and `azd up` to have it in the cloud in a couple minutes. The sample MCP tools include a weather assistant that can report temperature, humidity, wind, and precipitation for cities around the world, plus an invoice analyzer that uses Azure AI Content Understanding to extract structured vendor, total, and line item data from uploaded invoices or PDF/image files included with the repo.
+
+The MCP server is secured by design using keys and HTTPS, and allows more options for OAuth using built-in auth and/or [API Management](https://aka.ms/mcp-remote-apim-auth) as well as network isolation using VNET.
 
 If you're looking for this sample in more languages check out the [.NET/C#](https://github.com/Azure-Samples/remote-mcp-functions-dotnet) and [Node.js/TypeScript](https://github.com/Azure-Samples/remote-mcp-functions-typescript) versions.
 
@@ -37,19 +39,21 @@ Below is the architecture diagram for the Remote MCP Server using Azure Function
 
 ## Prepare your local environment
 
-An Azure Storage Emulator is needed for this particular sample because we will save and get snippets from blob storage.
+No extra emulators or services are required. The sample calls the public [Open-Meteo](https://open-meteo.com/) APIs to gather weather data, so you just need internet access.
 
-1. Start Azurite
+To enable the invoice analyzer locally, supply your Azure AI Content Understanding resource details in `src/local.settings.json` (or via environment variables) before starting the Functions host:
 
-    ```shell
-    docker run -p 10000:10000 -p 10001:10001 -p 10002:10002 \
-        mcr.microsoft.com/azure-storage/azurite
-    ```
+```json
+"CONTENT_UNDERSTANDING_ENDPOINT": "https://<your-resource-name>.cognitiveservices.azure.com/",
+"CONTENT_UNDERSTANDING_API_KEY": "<your-api-key>",
+"CONTENT_UNDERSTANDING_ANALYZER_ID": "prebuilt-invoice"
+```
 
->**Note** if you use Azurite coming from VS Code extension you need to run `Azurite: Start` now or you will see errors.
+Leave `CONTENT_UNDERSTANDING_API_KEY` empty if the function app should use managed identity instead of an API key. You can also override the default analyzer, API version, and polling behavior with the optional `CONTENT_UNDERSTANDING_API_VERSION`, `CONTENT_UNDERSTANDING_POLL_INTERVAL_SECONDS`, and `CONTENT_UNDERSTANDING_POLL_TIMEOUT_SECONDS` settings.
+
+Sample invoices live under the repository's `data/` folder (for example `data/invoice_sample.jpg`). You can copy your own test files into that directory when running locally, and they will be packaged with the Function app when you deploy with `azd`. Pass the `fileName` argument to reference a file inside the `data/` folder (use paths such as `invoice_sample.jpg`). You can optionally supply `invoiceId` when referencing nested folders or for backward compatibility. Optional `contentType` and `analyzerId` values let you override metadata when needed. The Azure Function now reads invoice bytes directly from disk—no base64 conversion is required or requested from the MCP client.
 
 ## Run your MCP Server locally from the terminal
-
 1. Change to the src folder in a new terminal window:
 
    ```shell
@@ -90,11 +94,15 @@ An Azure Storage Emulator is needed for this particular sample because we will s
     ```
 
     ```plaintext
-    Save this snippet as snippet1 
+    What's the weather in Seattle?
     ```
 
     ```plaintext
-    Retrieve snippet1 and apply to newFile.py
+    Give me the temperature, humidity, and wind details for Tokyo, JP
+    ```
+
+    ```plaintext
+    Extract the vendor, invoice number, due date, total, and line items from invoice.pdf
     ```
 
 1. When prompted to run the tool, consent by clicking **Continue**
@@ -136,6 +144,34 @@ azd env set VNET_ENABLED true
 ```
 
 Additionally, [API Management]() can be used for improved security and policies over your MCP Server, and [App Service built-in authentication](https://learn.microsoft.com/azure/app-service/overview-authentication-authorization) can be used to set up your favorite OAuth provider including Entra.  
+
+If you plan to use the invoice analyzer in Azure, configure your Content Understanding resource values before running `azd up`:
+
+```bash
+azd env set CONTENT_UNDERSTANDING_ENDPOINT https://<your-resource-name>.cognitiveservices.azure.com/
+azd env set CONTENT_UNDERSTANDING_API_KEY <your-api-key>
+azd env set CONTENT_UNDERSTANDING_ANALYZER_ID prebuilt-invoice
+```
+
+Leave the API key blank when authenticating with the function app's managed identity and grant that identity access to the Content Understanding resource. If you deploy custom model versions, pass the deployment (analyzer) identifier through `CONTENT_UNDERSTANDING_ANALYZER_ID`.
+
+Optional settings can be configured the same way when you need to override defaults:
+
+```bash
+azd env set CONTENT_UNDERSTANDING_API_VERSION 2025-11-01
+azd env set CONTENT_UNDERSTANDING_USER_AGENT remote-mcp-functions-python/1.0
+azd env set CONTENT_UNDERSTANDING_POLL_INTERVAL_SECONDS 2
+azd env set CONTENT_UNDERSTANDING_POLL_TIMEOUT_SECONDS 180
+```
+
+### Configure Content Understanding model deployments
+
+Azure Content Understanding GA requires a chat-completion model deployment (for example `gpt-4.1` or `gpt-4o-mini`) and an embeddings deployment (for example `text-embedding-3-large`) to be mapped to your Foundry resource. Without these defaults, the analyze APIs return errors such as `MissingModelDeploymentMapping`. Follow the [official guidance](https://learn.microsoft.com/azure/ai-services/content-understanding/concepts/models-deployments) to connect your analyzer to the correct deployments before you run the `analyze_invoice` tool:
+
+1. In the Azure portal, open your Microsoft Foundry resource and configure **Defaults** for both chat-completion and embeddings models, or issue a `PATCH /contentunderstanding/defaults` call with the desired `modelDeployments` payload.
+2. (Optional) Override those defaults per analyzer by including the `models.completion` and `models.embedding` entries in your custom analyzer definition if you need different model pairings.
+
+After the defaults are in place, re-run your analyzer request—no code changes are required in the function app, and the service will automatically route your invoices through the configured deployments.
 
 ## Connect to your *remote* MCP server function app from a client
 
@@ -244,84 +280,94 @@ azd deploy
 
 ## Source Code
 
-The function code for the `get_snippet` and `save_snippet` endpoints are defined in the Python files in the `src` directory. The MCP function annotations expose these functions as MCP Server tools.
+The MCP tools live in `src/function_app.py`. The `get_weather` tool calls into `src/weather_service.py`, which wraps the external API calls, while the `analyze_invoice` tool uses `src/content_understanding_service.py` to reach Azure AI Content Understanding and a local helper that reads invoice samples from the `data/` directory based on the supplied `fileName` (or optional `invoiceId` override). The annotations in `function_app.py` publish both tools through the MCP extension binding while keeping the HTTP trigger secured at the host level.
 
-Here's the actual code from the function_app.py file:
+Here's the relevant code from `function_app.py`:
 
 ```python
-
-@app.generic_trigger(arg_name="context", type="mcpToolTrigger", toolName="hello", 
-                     description="Hello world.", 
-                     toolProperties="[]")
-def hello_mcp(context) -> None:
-    """
-    A simple function that returns a greeting message.
-
-    Args:
-        context: The trigger context (not used in this function).
-
-    Returns:
-        str: A greeting message.
-    """
-    return "Hello I am MCPTool!"
-
-
 @app.generic_trigger(
     arg_name="context",
     type="mcpToolTrigger",
-    toolName="getsnippet",
-    description="Retrieve a snippet by name.",
-    toolProperties=tool_properties_get_snippets_json
+    toolName="get_weather",
+    description="Get current weather conditions for a specific city, including temperature, humidity, wind, and precipitation.",
+    toolProperties=tool_properties_get_weather_json,
 )
-@app.generic_input_binding(
-    arg_name="file",
-    type="blob",
-    connection="AzureWebJobsStorage",
-    path=_BLOB_PATH
-)
-def get_snippet(file: func.InputStream, context) -> str:
-    """
-    Retrieves a snippet by name from Azure Blob Storage.
- 
-    Args:
-        file (func.InputStream): The input binding to read the snippet from Azure Blob Storage.
-        context: The trigger context containing the input arguments.
- 
-    Returns:
-        str: The content of the snippet or an error message.
-    """
-    snippet_content = file.read().decode("utf-8")
-    logging.info(f"Retrieved snippet: {snippet_content}")
-    return snippet_content
+def get_weather(context) -> str:
+    """Retrieve near real-time weather readings for a requested location."""
 
+    try:
+        content = json.loads(context)
+        arguments = content.get("arguments", {})
+        city_name = (arguments.get(_CITY_NAME_PROPERTY_NAME) or "").strip()
+        country_code = arguments.get(_COUNTRY_CODE_PROPERTY_NAME)
+    except (TypeError, json.JSONDecodeError) as err:
+        logging.exception("Failed to decode tool arguments for get_weather")
+        return json.dumps({"error": "Invalid request payload", "details": str(err)})
 
-@app.generic_trigger(
-    arg_name="context",
-    type="mcpToolTrigger",
-    toolName="savesnippet",
-    description="Save a snippet with a name.",
-    toolProperties=tool_properties_save_snippets_json
-)                   
-@app.generic_output_binding(
-    arg_name="file",
-    type="blob",
-    connection="AzureWebJobsStorage",
-    path=_BLOB_PATH
-)
-def save_snippet(file: func.Out[str], context) -> str:
-    content = json.loads(context)
-    snippet_name_from_args = content["arguments"][_SNIPPET_NAME_PROPERTY_NAME]
-    snippet_content_from_args = content["arguments"][_SNIPPET_PROPERTY_NAME]
+    if not city_name:
+        return json.dumps({"error": "City name is required"})
 
-    if not snippet_name_from_args:
-        return "No snippet name provided"
+    try:
+        weather_summary = weather_service.get_weather(city_name=city_name, country_code=country_code)
+    except WeatherServiceError as exc:
+        logging.warning("Weather lookup failed for %s (%s)", city_name, country_code or "no country")
+        return json.dumps({"error": "Unable to retrieve weather information", "details": str(exc)})
 
-    if not snippet_content_from_args:
-        return "No snippet content provided"
- 
-    file.set(snippet_content_from_args)
-    logging.info(f"Saved snippet: {snippet_content_from_args}")
-    return f"Snippet '{snippet_content_from_args}' saved successfully"
+    return json.dumps(weather_summary)
+```
+
+And the helper in `weather_service.py` is responsible for translating city names into coordinates and querying [Open-Meteo](https://open-meteo.com/):
+
+```python
+class WeatherService:
+    _GEOCODING_ENDPOINT = "https://geocoding-api.open-meteo.com/v1/search"
+    _WEATHER_ENDPOINT = "https://api.open-meteo.com/v1/forecast"
+
+    def get_weather(self, city_name: str, country_code: Optional[str] = None) -> Dict[str, Any]:
+        location = self._resolve_location(city_name, country_code)
+        weather_payload = self._fetch_weather(location)
+        current = weather_payload.get("current", {})
+        units = weather_payload.get("current_units", {})
+
+        return {
+            "location": {
+                "city": location.name,
+                "country": location.country,
+                "latitude": location.latitude,
+                "longitude": location.longitude,
+            },
+            "conditions": {
+                "temperature": {
+                    "value": current.get("temperature_2m"),
+                    "unit": units.get("temperature_2m"),
+                },
+                "relativeHumidity": {
+                    "value": current.get("relative_humidity_2m"),
+                    "unit": units.get("relative_humidity_2m"),
+                },
+                "wind": {
+                    "speed": {
+                        "value": current.get("wind_speed_10m"),
+                        "unit": units.get("wind_speed_10m"),
+                    },
+                    "direction": {
+                        "value": current.get("wind_direction_10m"),
+                        "unit": units.get("wind_direction_10m"),
+                    },
+                },
+                "precipitation": {
+                    "value": current.get("precipitation"),
+                    "unit": units.get("precipitation"),
+                },
+                "weatherCode": current.get("weather_code"),
+                "time": current.get("time"),
+            },
+            "attribution": {
+                "source": "Open-Meteo",
+                "license": "CC BY 4.0",
+                "url": "https://open-meteo.com/",
+            },
+        }
 ```
 
 Note that the `host.json` file also includes a reference to the experimental bundle, which is required for apps using this feature:

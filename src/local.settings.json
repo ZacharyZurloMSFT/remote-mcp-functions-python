@@ -2,6 +2,9 @@
     "IsEncrypted": false,
     "Values": {
       "FUNCTIONS_WORKER_RUNTIME": "python",
-      "AzureWebJobsStorage": "UseDevelopmentStorage=true"
+      "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+      "CONTENT_UNDERSTANDING_ENDPOINT": "https://<your-resource>.cognitiveservices.azure.com/",
+      "CONTENT_UNDERSTANDING_API_KEY": "",
+      "CONTENT_UNDERSTANDING_ANALYZER_ID": "prebuilt-invoice"
     }
   }
